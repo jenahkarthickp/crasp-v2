@@ -21,6 +21,7 @@ import os
 import sys
 import warnings
 import io
+import hashlib
 from pathlib import Path
 from datetime import date
 warnings.filterwarnings("ignore")
@@ -472,6 +473,11 @@ def run_prediction(org_data, clf, scaler, feat_cols, regs, anomaly, forecaster, 
     X   = prepare_features_for_prediction(org_data, feat_cols)
     X_s = scaler.transform(X)
 
+    # Deterministic per-organisation RNG so the simulated history / forecast
+    # stay stable across reruns (avoids the numbers jittering during a demo).
+    _seed = int(hashlib.md5(str(org_data.get("company_name", "")).encode()).hexdigest()[:8], 16)
+    rng = np.random.default_rng(_seed)
+
     level_raw   = int(clf.predict(X_s)[0])
     level_pred  = level_raw + 1
     level_proba = clf.predict_proba(X_s)[0]
@@ -487,7 +493,7 @@ def run_prediction(org_data, clf, scaler, feat_cols, regs, anomaly, forecaster, 
     anomaly_score = float(anomaly.decision_function(X_s)[0])
 
     # Simulate 12 months of history centred on current score
-    history = [max(5, overall + np.random.normal(-i * 0.4, 2)) for i in range(12, 0, -1)]
+    history = [max(5, overall + rng.normal(-i * 0.4, 2)) for i in range(12, 0, -1)]
     history = [round(float(np.clip(h, 5, 99)), 1) for h in history] + [overall]
 
     def forecast_ahead(months_ahead):
@@ -1045,8 +1051,15 @@ with tab3:
 
     if user_threat.strip():
         predicted_severity = nlp.predict([user_threat])[0]
-        proba_sev = nlp.predict_proba([user_threat])[0]
         classes   = nlp.classes_
+        if hasattr(nlp, "predict_proba"):
+            proba_sev = nlp.predict_proba([user_threat])[0]
+        else:
+            # LinearSVC has no predict_proba — derive pseudo-probabilities
+            # from a softmax over the decision-function margins.
+            _d = np.atleast_2d(nlp.decision_function([user_threat]))
+            _e = np.exp(_d - _d.max(axis=1, keepdims=True))
+            proba_sev = (_e / _e.sum(axis=1, keepdims=True))[0]
         sev_colors = {"CRITICAL":"#d32f2f","HIGH":"#f57c00","MEDIUM":"#fbc02d","LOW":"#388e3c"}
         col_sev, col_conf = st.columns(2)
         with col_sev:
